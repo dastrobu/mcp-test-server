@@ -17,6 +17,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct FailRequest {}
 
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct DelayRequest {
+    /// Duration to delay in seconds
+    duration_seconds: u64,
+}
+
 #[derive(Clone)]
 pub struct FailingMcpServer {
     tool_router: ToolRouter<Self>,
@@ -39,6 +45,16 @@ impl FailingMcpServer {
             message: "This tool always fails intentionally for testing purposes".into(),
             data: None,
         })
+    }
+
+    /// Delays for the specified duration in seconds for timeout testing
+    #[rmcp::tool(description = "Delays for the specified duration in seconds for timeout testing")]
+    async fn delay(&self, params: Parameters<DelayRequest>) -> Result<CallToolResult, ErrorData> {
+        let duration = params.0.duration_seconds;
+        eprintln!("delay: Sleeping for {} seconds", duration);
+        tokio::time::sleep(tokio::time::Duration::from_secs(duration)).await;
+        eprintln!("delay: Completed");
+        Ok(CallToolResult::success(vec![]))
     }
 }
 
@@ -67,6 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("MCP Fail Server v{} starting", env!("CARGO_PKG_VERSION"));
     eprintln!("Available tools:");
     eprintln!("  - fail: Always returns an error");
+    eprintln!("  - delay: Delays for a specified duration (for timeout testing)");
     eprintln!();
 
     // Create server handler
