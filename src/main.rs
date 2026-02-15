@@ -36,7 +36,7 @@ pub struct SucceedRequest {}
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct AddToolRequest {
     name: String,
-    input_json_schema: serde_json::Value,
+    input_json_schema: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -47,7 +47,7 @@ pub struct RemoveToolRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolDefinition {
     name: String,
-    input_json_schema: serde_json::Value,
+    input_json_schema: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Clone)]
@@ -183,12 +183,7 @@ impl ServerHandler for DynamicProxy {
         // Add dynamic tools
         let dynamic = self.inner.dynamic_tools.read().unwrap();
         for tool in dynamic.values() {
-            let input_schema =
-                if let serde_json::Value::Object(map) = tool.input_json_schema.clone() {
-                    Arc::new(map)
-                } else {
-                    Arc::new(serde_json::Map::new())
-                };
+            let input_schema = Arc::new(tool.input_json_schema.clone());
 
             result.tools.push(rmcp::model::Tool {
                 name: tool.name.clone().into(),
@@ -270,7 +265,10 @@ mod tests {
         // Test add_tool
         let add_params = AddToolRequest {
             name: "my_dynamic_tool".into(),
-            input_json_schema: serde_json::json!({"type": "object"}),
+            input_json_schema: serde_json::json!({"type": "object"})
+                .as_object()
+                .unwrap()
+                .clone(),
         };
 
         let result = server.add_tool(Parameters(add_params)).await;
