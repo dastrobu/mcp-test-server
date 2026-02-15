@@ -99,7 +99,9 @@ impl FailingMcpServer {
         Ok(CallToolResult::success(vec![]))
     }
 
-    #[rmcp::tool(description = "Adds a dynamic tool")]
+    #[rmcp::tool(
+        description = "Adds a dynamic tool. Example input_json_schema: { \"type\": \"object\", \"properties\": { \"city\": { \"type\": \"string\" } } }"
+    )]
     async fn add_tool(
         &self,
         params: Parameters<AddToolRequest>,
