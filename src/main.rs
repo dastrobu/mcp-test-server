@@ -12,6 +12,7 @@ use rmcp::{
     model::{
         CallToolRequestParams, CallToolResult, ErrorCode, ErrorData, Implementation,
         ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo,
+        ServerNotification, ToolListChangedNotification,
     },
     ServerHandler, ServiceExt,
 };
@@ -157,7 +158,13 @@ impl ServerHandler for FailingMcpServer {
                  Provides one tool: 'fail' which always returns an error."
                     .into(),
             ),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            capabilities: {
+                let mut caps = ServerCapabilities::builder().enable_tools().build();
+                if let Some(tools) = &mut caps.tools {
+                    tools.list_changed = Some(true);
+                }
+                caps
+            },
             ..Default::default()
         }
     }
@@ -205,11 +212,28 @@ impl ServerHandler for DynamicProxy {
         params: CallToolRequestParams,
         req: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
+        let name = params.name.clone();
+        let req_clone = req.clone();
+
         // Try inner first
         let result = self.inner.call_tool(params.clone(), req).await;
 
         match result {
-            Ok(res) => Ok(res),
+            Ok(res) => {
+                if name == "add_tool" || name == "remove_tool" {
+                    eprintln!("Sending tools/list_changed notification");
+                    if let Err(e) = req_clone
+                        .peer
+                        .send_notification(ServerNotification::ToolListChangedNotification(
+                            ToolListChangedNotification::default(),
+                        ))
+                        .await
+                    {
+                        eprintln!("Failed to send notification: {:?}", e);
+                    }
+                }
+                Ok(res)
+            }
             Err(e) => {
                 if e.code == ErrorCode(-32601) {
                     // MethodNotFound
