@@ -5,14 +5,21 @@
 //!
 //! Built using the official Model Context Protocol Rust SDK.
 
+use rmcp::service::RequestContext;
+use rmcp::service::RoleServer;
 use rmcp::{
     handler::server::{tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, ErrorCode, ErrorData, Implementation, ServerCapabilities, ServerInfo},
+    model::{
+        CallToolRequestParams, CallToolResult, ErrorCode, ErrorData, Implementation,
+        ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo,
+    },
     ServerHandler, ServiceExt,
 };
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct FailRequest {}
@@ -26,9 +33,27 @@ pub struct DelayRequest {
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SucceedRequest {}
 
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct AddToolRequest {
+    name: String,
+    input_json_schema: serde_json::Value,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct RemoveToolRequest {
+    name: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ToolDefinition {
+    name: String,
+    input_json_schema: serde_json::Value,
+}
+
 #[derive(Clone)]
 pub struct FailingMcpServer {
     tool_router: ToolRouter<Self>,
+    pub dynamic_tools: Arc<RwLock<HashMap<String, ToolDefinition>>>,
 }
 
 #[rmcp::tool_router]
@@ -36,6 +61,7 @@ impl FailingMcpServer {
     fn new() -> Self {
         Self {
             tool_router: Self::tool_router(),
+            dynamic_tools: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -61,10 +87,59 @@ impl FailingMcpServer {
     }
 
     /// Always succeeds with a success message for testing successful tool execution
-    #[rmcp::tool(description = "Always succeeds with a success message for testing successful tool execution")]
-    async fn succeed(&self, _params: Parameters<SucceedRequest>) -> Result<CallToolResult, ErrorData> {
+    #[rmcp::tool(
+        description = "Always succeeds with a success message for testing successful tool execution"
+    )]
+    async fn succeed(
+        &self,
+        _params: Parameters<SucceedRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
         eprintln!("succeed: Returning success");
         Ok(CallToolResult::success(vec![]))
+    }
+
+    #[rmcp::tool(description = "Adds a dynamic tool")]
+    async fn add_tool(
+        &self,
+        params: Parameters<AddToolRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let name = params.0.name.clone();
+        let schema = params.0.input_json_schema.clone();
+
+        {
+            let mut tools = self.dynamic_tools.write().unwrap();
+            tools.insert(
+                name.clone(),
+                ToolDefinition {
+                    name,
+                    input_json_schema: schema,
+                },
+            );
+        }
+
+        eprintln!("add_tool: Added tool '{}'", params.0.name);
+
+        Ok(CallToolResult::success(vec![rmcp::model::Content::text(
+            "got input...",
+        )]))
+    }
+
+    #[rmcp::tool(description = "Removes a dynamic tool")]
+    async fn remove_tool(
+        &self,
+        params: Parameters<RemoveToolRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let name = params.0.name.clone();
+        {
+            let mut tools = self.dynamic_tools.write().unwrap();
+            tools.remove(&name);
+        }
+
+        eprintln!("remove_tool: Removed tool '{}'", name);
+
+        Ok(CallToolResult::success(vec![rmcp::model::Content::text(
+            "tool removed",
+        )]))
     }
 }
 
@@ -88,6 +163,76 @@ impl ServerHandler for FailingMcpServer {
     }
 }
 
+struct DynamicProxy {
+    inner: FailingMcpServer,
+}
+
+impl ServerHandler for DynamicProxy {
+    fn get_info(&self) -> ServerInfo {
+        self.inner.get_info()
+    }
+
+    async fn list_tools(
+        &self,
+        params: Option<PaginatedRequestParams>,
+        req: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, ErrorData> {
+        // Get static tools from inner
+        let mut result = self.inner.list_tools(params, req).await?;
+
+        // Add dynamic tools
+        let dynamic = self.inner.dynamic_tools.read().unwrap();
+        for tool in dynamic.values() {
+            let input_schema =
+                if let serde_json::Value::Object(map) = tool.input_json_schema.clone() {
+                    Arc::new(map)
+                } else {
+                    Arc::new(serde_json::Map::new())
+                };
+
+            result.tools.push(rmcp::model::Tool {
+                name: tool.name.clone().into(),
+                description: Some("Dynamic tool".into()),
+                input_schema,
+                output_schema: None,
+                title: None,
+                annotations: None,
+                icons: None,
+                meta: None,
+            });
+        }
+
+        Ok(result)
+    }
+
+    async fn call_tool(
+        &self,
+        params: CallToolRequestParams,
+        req: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        // Try inner first
+        let result = self.inner.call_tool(params.clone(), req).await;
+
+        match result {
+            Ok(res) => Ok(res),
+            Err(e) => {
+                if e.code == ErrorCode(-32601) {
+                    // MethodNotFound
+                    let name = params.name;
+                    let tools = self.inner.dynamic_tools.read().unwrap();
+                    if let Some(_tool) = tools.get(name.as_ref()) {
+                        eprintln!("call_tool: Called dynamic tool '{}'", name);
+                        return Ok(CallToolResult::success(vec![rmcp::model::Content::text(
+                            "got input...",
+                        )]));
+                    }
+                }
+                Err(e)
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("MCP Fail Server v{} starting", env!("CARGO_PKG_VERSION"));
@@ -95,13 +240,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("  - fail: Always returns an error");
     eprintln!("  - delay: Delays for a specified duration (for timeout testing)");
     eprintln!("  - succeed: Always succeeds with a success message");
+    eprintln!("  - add_tool: Adds a dynamic tool");
+    eprintln!("  - remove_tool: Removes a dynamic tool");
     eprintln!();
 
     // Create server handler
     let handler = FailingMcpServer::new();
+    let proxy = DynamicProxy { inner: handler };
 
     // Serve on stdio
-    let server = handler
+    let server = proxy
         .serve((tokio::io::stdin(), tokio::io::stdout()))
         .await?;
 
@@ -109,4 +257,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     server.waiting().await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_dynamic_tools() {
+        let server = FailingMcpServer::new();
+
+        // Test add_tool
+        let add_params = AddToolRequest {
+            name: "my_dynamic_tool".into(),
+            input_json_schema: serde_json::json!({"type": "object"}),
+        };
+
+        let result = server.add_tool(Parameters(add_params)).await;
+        assert!(result.is_ok());
+
+        {
+            let tools = server.dynamic_tools.read().unwrap();
+            assert!(tools.contains_key("my_dynamic_tool"));
+            assert_eq!(
+                tools.get("my_dynamic_tool").unwrap().name,
+                "my_dynamic_tool"
+            );
+        }
+
+        // Test remove_tool
+        let remove_params = RemoveToolRequest {
+            name: "my_dynamic_tool".into(),
+        };
+
+        let result = server.remove_tool(Parameters(remove_params)).await;
+        assert!(result.is_ok());
+
+        {
+            let tools = server.dynamic_tools.read().unwrap();
+            assert!(!tools.contains_key("my_dynamic_tool"));
+        }
+    }
 }
