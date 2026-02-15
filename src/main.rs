@@ -253,8 +253,8 @@ impl ServerHandler for DynamicProxy {
                 Ok(res)
             }
             Err(e) => {
-                if e.code == ErrorCode(-32601) {
-                    // MethodNotFound
+                if e.code == ErrorCode(-32601) || e.code == ErrorCode(-32602) {
+                    // MethodNotFound or InvalidParams (tool not found)
                     let name = params.name;
                     let tools = self.inner.dynamic_tools.read().unwrap();
                     if let Some(_tool) = tools.get(name.as_ref()) {
