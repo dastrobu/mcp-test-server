@@ -107,6 +107,22 @@ impl FailingMcpServer {
         let name = params.0.name.clone();
         let schema = params.0.input_json_schema.clone();
 
+        if let Some(t) = schema.get("type") {
+            if t != "object" {
+                return Err(ErrorData {
+                    code: ErrorCode(-32602),
+                    message: "input_json_schema must be of type 'object'".into(),
+                    data: None,
+                });
+            }
+        } else {
+            return Err(ErrorData {
+                code: ErrorCode(-32602),
+                message: "input_json_schema must have 'type': 'object'".into(),
+                data: None,
+            });
+        }
+
         {
             let mut tools = self.dynamic_tools.write().unwrap();
             tools.insert(
@@ -286,7 +302,7 @@ mod tests {
     async fn test_dynamic_tools() {
         let server = FailingMcpServer::new();
 
-        // Test add_tool
+        // Test add_tool success
         let add_params = AddToolRequest {
             name: "my_dynamic_tool".into(),
             input_json_schema: serde_json::json!({"type": "object"})
@@ -319,5 +335,66 @@ mod tests {
             let tools = server.dynamic_tools.read().unwrap();
             assert!(!tools.contains_key("my_dynamic_tool"));
         }
+    }
+
+    #[tokio::test]
+    async fn test_add_tool_validation() {
+        let server = FailingMcpServer::new();
+
+        // Test add_tool with invalid type
+        let add_params = AddToolRequest {
+            name: "invalid_tool".into(),
+            input_json_schema: serde_json::json!({"type": "string"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        };
+
+        let result = server.add_tool(Parameters(add_params)).await;
+        assert!(result.is_err());
+        assert_eq!(
+            result.err().unwrap().message,
+            "input_json_schema must be of type 'object'"
+        );
+
+        // Test add_tool with missing type
+        let add_params_missing = AddToolRequest {
+            name: "missing_type_tool".into(),
+            input_json_schema: serde_json::json!({"properties": {}})
+                .as_object()
+                .unwrap()
+                .clone(),
+        };
+
+        let result = server.add_tool(Parameters(add_params_missing)).await;
+        assert!(result.is_err());
+        assert_eq!(
+            result.err().unwrap().message,
+            "input_json_schema must have 'type': 'object'"
+        );
+    }
+
+    #[test]
+    fn test_tool_serialization_schema() {
+        // Verify that a correct schema serializes with type: object
+        let schema = serde_json::json!({"type": "object"})
+            .as_object()
+            .unwrap()
+            .clone();
+
+        let tool = rmcp::model::Tool {
+            name: "test".into(),
+            description: Some("Dynamic tool".into()),
+            input_schema: Arc::new(schema),
+            output_schema: None,
+            title: None,
+            annotations: None,
+            icons: None,
+            meta: None,
+        };
+
+        let json = serde_json::to_string(&tool).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(val["inputSchema"]["type"], "object");
     }
 }
