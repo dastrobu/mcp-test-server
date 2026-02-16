@@ -259,8 +259,14 @@ impl ServerHandler for DynamicProxy {
                     let tools = self.inner.dynamic_tools.read().unwrap();
                     if let Some(_tool) = tools.get(name.as_ref()) {
                         eprintln!("call_tool: Called dynamic tool '{}'", name);
+                        let input_str = match params.arguments {
+                            Some(args) => {
+                                serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string())
+                            }
+                            None => "{}".to_string(),
+                        };
                         return Ok(CallToolResult::success(vec![rmcp::model::Content::text(
-                            "got input...",
+                            format!("got input: {}", input_str),
                         )]));
                     }
                 }
