@@ -1,25 +1,28 @@
-# MCP Fail Server
+# MCP Test Server
 
-A simple Model Context Protocol (MCP) server that provides a single tool which always fails. Useful for testing error handling in MCP clients.
+A simple Model Context Protocol (MCP) server that provides various tools to test edge cases with MCP clients. Useful for testing error handling in MCP clients.
 
 ## Features
 
-- Single tool `fail` that always returns an error
+- **fail**: Always returns an error (useful for testing error handling)
+- **delay**: Delays response for a specified duration (useful for testing timeouts)
+- **succeed**: Always succeeds (useful for verifying basic connectivity)
+- **add_tool**: Dynamically adds a new tool at runtime
+- **remove_tool**: Dynamically removes a tool at runtime
 - Built with the official [MCP Rust SDK](https://github.com/modelcontextprotocol/rust-sdk)
 - Communicates over stdio for easy integration
-- Minimal dependencies
 
 ## Installation
 
 ```bash
-cargo install --git https://github.com/dastrobu/mcp-fail-server
+cargo install --git https://github.com/dastrobu/mcp-test-server
 ```
 
 Or build from source:
 
 ```bash
-git clone https://github.com/dastrobu/mcp-fail-server
-cd mcp-fail-server
+git clone https://github.com/dastrobu/mcp-test-server
+cd mcp-test-server
 cargo build --release
 ```
 
@@ -28,7 +31,7 @@ cargo build --release
 Run the server:
 
 ```bash
-mcp-fail-server
+mcp-test-server
 ```
 
 The server communicates via stdio and follows the [Model Context Protocol](https://modelcontextprotocol.io/) specification.
@@ -36,6 +39,10 @@ The server communicates via stdio and follows the [Model Context Protocol](https
 ### Available Tools
 
 - **fail**: Always returns an error with the message "This tool always fails intentionally for testing purposes"
+- **delay**: Takes `duration_seconds` (integer) and sleeps for that amount of time before returning success.
+- **succeed**: Returns a success message immediately.
+- **add_tool**: Adds a dynamic tool. Takes `name` (string) and `input_json_schema` (object).
+- **remove_tool**: Removes a dynamic tool. Takes `name` (string).
 
 ## License
 
@@ -45,4 +52,3 @@ Licensed under either of
 - MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
 
 at your option.
-

@@ -167,13 +167,13 @@ impl ServerHandler for FailingMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             server_info: Implementation {
-                name: "mcp-fail-server".into(),
+                name: "mcp-test-server".into(),
                 version: env!("CARGO_PKG_VERSION").into(),
                 ..Default::default()
             },
             instructions: Some(
-                "A test server for analyzing tool error handling in MCP clients. \
-                 Provides one tool: 'fail' which always returns an error."
+                "A test server for analyzing tool execution in MCP clients. \
+                 Provides various tools for testing edge cases."
                     .into(),
             ),
             capabilities: {

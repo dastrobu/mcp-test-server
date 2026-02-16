@@ -1,11 +1,11 @@
 [package]
-name = "mcp-fail-server"
+name = "mcp-test-server"
 version = "0.1.0"
 edition = "2021"
 authors = ["Daniel Strobusch <dastrobu@gmail.com>"]
-description = "A test MCP server that always fails - useful for testing error handling in MCP clients"
+description = "A test MCP server that provides various tools to test edge cases with MCP clients"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/dastrobu/mcp-fail-server"
+repository = "https://github.com/dastrobu/mcp-test-server"
 keywords = ["mcp", "testing", "model-context-protocol"]
 categories = ["development-tools::testing"]
 
@@ -17,5 +17,5 @@ serde_json = "1.0"
 tokio = { version = "1", features = ["full"] }
 
 [[bin]]
-name = "mcp-fail-server"
+name = "mcp-test-server"
 path = "src/main.rs"
