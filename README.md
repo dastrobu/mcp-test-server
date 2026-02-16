@@ -7,8 +7,8 @@ A simple Model Context Protocol (MCP) server that provides various tools to test
 - **fail**: Always returns an error (useful for testing error handling)
 - **delay**: Delays response for a specified duration (useful for testing timeouts)
 - **succeed**: Always succeeds (useful for verifying basic connectivity)
-- **add_tool**: Dynamically adds a new tool at runtime
-- **remove_tool**: Dynamically removes a tool at runtime
+- **add_tool**: Dynamically adds a new tool at runtime to session.
+- **remove_tool**: Dynamically removes a tool at runtime from session.
 - Built with the official [MCP Rust SDK](https://github.com/modelcontextprotocol/rust-sdk)
 - Communicates over stdio for easy integration
 
