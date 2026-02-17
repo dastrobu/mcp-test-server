@@ -22,6 +22,31 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+use axum::Router;
+use clap::Parser;
+use std::net::SocketAddr;
+use tower_http::cors::CorsLayer;
+
+use rmcp::transport::streamable_http_server::{
+    session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+};
+
+#[derive(Parser, Clone)]
+#[command(version, about, long_about = None)]
+struct Cli {
+    #[arg(long, default_value = "stdio")]
+    transport: TransportType,
+
+    #[arg(long, default_value = "3000")]
+    port: u16,
+}
+
+#[derive(clap::ValueEnum, Clone, Debug, PartialEq)]
+enum TransportType {
+    Stdio,
+    Http,
+}
+
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct FailRequest {}
 
@@ -188,6 +213,7 @@ impl ServerHandler for FailingMcpServer {
     }
 }
 
+#[derive(Clone)]
 struct DynamicProxy {
     inner: FailingMcpServer,
 }
@@ -219,6 +245,7 @@ impl ServerHandler for DynamicProxy {
                 annotations: None,
                 icons: None,
                 meta: None,
+                execution: None,
             });
         }
 
@@ -278,26 +305,72 @@ impl ServerHandler for DynamicProxy {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!("MCP Fail Server v{} starting", env!("CARGO_PKG_VERSION"));
-    eprintln!("Available tools:");
-    eprintln!("  - fail: Always returns an error");
-    eprintln!("  - delay: Delays for a specified duration (for timeout testing)");
-    eprintln!("  - succeed: Always succeeds with a success message");
-    eprintln!("  - add_tool: Adds a dynamic tool");
-    eprintln!("  - remove_tool: Removes a dynamic tool");
-    eprintln!();
+    let cli = Cli::parse();
 
     // Create server handler
     let handler = FailingMcpServer::new();
     let proxy = DynamicProxy { inner: handler };
 
-    // Serve on stdio
-    let server = proxy
-        .serve((tokio::io::stdin(), tokio::io::stdout()))
-        .await?;
+    match cli.transport {
+        TransportType::Stdio => {
+            eprintln!("MCP Fail Server v{} starting", env!("CARGO_PKG_VERSION"));
+            eprintln!("Available tools:");
+            eprintln!("  - fail: Always returns an error");
+            eprintln!("  - delay: Delays for a specified duration (for timeout testing)");
+            eprintln!("  - succeed: Always succeeds with a success message");
+            eprintln!("  - add_tool: Adds a dynamic tool");
+            eprintln!("  - remove_tool: Removes a dynamic tool");
+            eprintln!();
 
-    // Wait for completion
-    server.waiting().await?;
+            // Serve on stdio
+            let server = proxy
+                .serve((tokio::io::stdin(), tokio::io::stdout()))
+                .await?;
+
+            // Wait for completion
+            server.waiting().await?;
+        }
+        TransportType::Http => {
+            run_http(cli.port).await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_http(port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    let ct = tokio_util::sync::CancellationToken::new();
+
+    let service = StreamableHttpService::new(
+        move || {
+            let handler = FailingMcpServer::new();
+            Ok(DynamicProxy { inner: handler })
+        },
+        LocalSessionManager::default().into(),
+        StreamableHttpServerConfig {
+            cancellation_token: ct.child_token(),
+            ..Default::default()
+        },
+    );
+
+    let app = Router::new()
+        .nest_service("", service)
+        .layer(CorsLayer::permissive());
+
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    eprintln!(
+        "MCP Fail Server v{} starting on http://{}",
+        env!("CARGO_PKG_VERSION"),
+        addr
+    );
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            tokio::signal::ctrl_c().await.unwrap();
+            ct.cancel();
+        })
+        .await?;
 
     Ok(())
 }
@@ -399,6 +472,7 @@ mod tests {
             annotations: None,
             icons: None,
             meta: None,
+            execution: None,
         };
 
         let json = serde_json::to_string(&tool).unwrap();
