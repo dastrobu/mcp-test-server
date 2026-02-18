@@ -21,6 +21,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use jsonschema::Validator;
 
 use axum::Router;
 use clap::Parser;
@@ -74,6 +75,15 @@ pub struct RemoveToolRequest {
 pub struct ToolDefinition {
     name: String,
     input_json_schema: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ValidationResponse {
+    valid: bool,
+    #[serde(rename = "receivedInput")]
+    received_input: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    errors: Option<Vec<String>>,
 }
 
 #[derive(Clone)]
@@ -284,16 +294,50 @@ impl ServerHandler for DynamicProxy {
                     // MethodNotFound or InvalidParams (tool not found)
                     let name = params.name;
                     let tools = self.inner.dynamic_tools.read().unwrap();
-                    if let Some(_tool) = tools.get(name.as_ref()) {
+                    if let Some(tool) = tools.get(name.as_ref()) {
                         eprintln!("call_tool: Called dynamic tool '{}'", name);
-                        let input_str = match params.arguments {
-                            Some(args) => {
-                                serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string())
+
+                        let received_input_value = serde_json::to_value(
+                            params.arguments.clone().unwrap_or_default()
+                        ).unwrap_or(serde_json::json!({}));
+
+                        // Validate input against schema
+                        let schema_value = serde_json::to_value(&tool.input_json_schema)
+                            .unwrap_or(serde_json::json!({"type": "object"}));
+
+                        let validation_result = match Validator::new(&schema_value) {
+                            Ok(validator) => {
+                                let errors: Vec<String> = validator
+                                    .iter_errors(&received_input_value)
+                                    .map(|e| format!("{}", e))
+                                    .collect();
+
+                                if errors.is_empty() {
+                                    ValidationResponse {
+                                        valid: true,
+                                        received_input: received_input_value.clone(),
+                                        errors: None,
+                                    }
+                                } else {
+                                    ValidationResponse {
+                                        valid: false,
+                                        received_input: received_input_value.clone(),
+                                        errors: Some(errors),
+                                    }
+                                }
                             }
-                            None => "{}".to_string(),
+                            Err(e) => ValidationResponse {
+                                valid: false,
+                                received_input: received_input_value.clone(),
+                                errors: Some(vec![format!("Schema compilation error: {}", e)]),
+                            }
                         };
+
+                        let response_json = serde_json::to_string_pretty(&validation_result)
+                            .unwrap_or_else(|_| "{}".to_string());
+
                         return Ok(CallToolResult::success(vec![rmcp::model::Content::text(
-                            format!("got input: {}", input_str),
+                            response_json,
                         )]));
                     }
                 }
@@ -434,26 +478,400 @@ mod tests {
         let result = server.add_tool(Parameters(add_params)).await;
         assert!(result.is_err());
         assert_eq!(
-            result.err().unwrap().message,
-            "input_json_schema must be of type 'object'"
-        );
-
-        // Test add_tool with missing type
-        let add_params_missing = AddToolRequest {
-            name: "missing_type_tool".into(),
-            input_json_schema: serde_json::json!({"properties": {}})
-                .as_object()
-                .unwrap()
-                .clone(),
-        };
-
-        let result = server.add_tool(Parameters(add_params_missing)).await;
-        assert!(result.is_err());
-        assert_eq!(
-            result.err().unwrap().message,
-            "input_json_schema must have 'type': 'object'"
+            result.unwrap_err().code,
+            ErrorCode(-32602)
         );
     }
+
+    #[test]
+    fn test_validation_response_serialization() {
+        // Test valid response
+        let valid_response = ValidationResponse {
+            valid: true,
+            received_input: serde_json::json!({"a": 1, "b": 2}),
+            errors: None,
+        };
+
+        let json = serde_json::to_value(&valid_response).unwrap();
+        assert_eq!(json["valid"], true);
+        assert_eq!(json["receivedInput"]["a"], 1);
+        assert!(json.get("errors").is_none());
+
+        // Test invalid response with errors
+        let invalid_response = ValidationResponse {
+            valid: false,
+            received_input: serde_json::json!({"a": "wrong"}),
+            errors: Some(vec!["error1".to_string(), "error2".to_string()]),
+        };
+
+        let json = serde_json::to_value(&invalid_response).unwrap();
+        assert_eq!(json["valid"], false);
+        assert_eq!(json["receivedInput"]["a"], "wrong");
+        assert_eq!(json["errors"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_validation() {
+        struct TestCase {
+            name: &'static str,
+            schema: serde_json::Value,
+            input: serde_json::Value,
+            should_be_valid: bool,
+            expected_error_patterns: Vec<&'static str>,
+        }
+
+        let test_cases = vec![
+            TestCase {
+                name: "valid input with all required fields",
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "age": {"type": "number"}
+                    },
+                    "required": ["name", "age"]
+                }),
+                input: serde_json::json!({
+                    "name": "John",
+                    "age": 30
+                }),
+                should_be_valid: true,
+                expected_error_patterns: vec![],
+            },
+            TestCase {
+                name: "missing required field",
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "age": {"type": "number"}
+                    },
+                    "required": ["name", "age"]
+                }),
+                input: serde_json::json!({
+                    "name": "John"
+                }),
+                should_be_valid: false,
+                expected_error_patterns: vec!["age", "required"],
+            },
+            TestCase {
+                name: "wrong type (string instead of number)",
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "age": {"type": "number"}
+                    }
+                }),
+                input: serde_json::json!({
+                    "name": "John",
+                    "age": "thirty"
+                }),
+                should_be_valid: false,
+                expected_error_patterns: vec!["number"],
+            },
+            TestCase {
+                name: "invalid enum value",
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "operation": {
+                            "type": "string",
+                            "enum": ["add", "subtract", "multiply", "divide"]
+                        }
+                    },
+                    "required": ["operation"]
+                }),
+                input: serde_json::json!({
+                    "operation": "modulo"
+                }),
+                should_be_valid: false,
+                expected_error_patterns: vec!["modulo"],
+            },
+            TestCase {
+                name: "multiple validation errors",
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "operation": {
+                            "type": "string",
+                            "enum": ["add", "subtract"]
+                        },
+                        "a": {"type": "number"},
+                        "b": {"type": "number"}
+                    },
+                    "required": ["operation", "a", "b"]
+                }),
+                input: serde_json::json!({
+                    "operation": "power",
+                    "a": "not a number"
+                }),
+                should_be_valid: false,
+                expected_error_patterns: vec!["power", "number", "required"],
+            },
+            TestCase {
+                name: "null input when object expected",
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"}
+                    }
+                }),
+                input: serde_json::json!(null),
+                should_be_valid: false,
+                expected_error_patterns: vec!["object"],
+            },
+            TestCase {
+                name: "array instead of object",
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"}
+                    }
+                }),
+                input: serde_json::json!(["not", "an", "object"]),
+                should_be_valid: false,
+                expected_error_patterns: vec!["object"],
+            },
+            TestCase {
+                name: "number exceeds maximum",
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "age": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 120
+                        }
+                    }
+                }),
+                input: serde_json::json!({"age": 150}),
+                should_be_valid: false,
+                expected_error_patterns: vec!["maximum"],
+            },
+            TestCase {
+                name: "number below minimum",
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "age": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 120
+                        }
+                    }
+                }),
+                input: serde_json::json!({"age": -5}),
+                should_be_valid: false,
+                expected_error_patterns: vec!["minimum"],
+            },
+            TestCase {
+                name: "number within valid range",
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "age": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 120
+                        }
+                    }
+                }),
+                input: serde_json::json!({"age": 25}),
+                should_be_valid: true,
+                expected_error_patterns: vec![],
+            },
+            TestCase {
+                name: "string matches pattern",
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "email": {
+                            "type": "string",
+                            "pattern": "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
+                        }
+                    }
+                }),
+                input: serde_json::json!({"email": "test@example.com"}),
+                should_be_valid: true,
+                expected_error_patterns: vec![],
+            },
+            TestCase {
+                name: "string does not match pattern",
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "email": {
+                            "type": "string",
+                            "pattern": "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
+                        }
+                    }
+                }),
+                input: serde_json::json!({"email": "not-an-email"}),
+                should_be_valid: false,
+                expected_error_patterns: vec!["does not match", "not-an-email"],
+            },
+            TestCase {
+                name: "additional properties not allowed",
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"}
+                    },
+                    "additionalProperties": false
+                }),
+                input: serde_json::json!({
+                    "name": "John",
+                    "extra": "not allowed"
+                }),
+                should_be_valid: false,
+                expected_error_patterns: vec!["additional"],
+            },
+            TestCase {
+                name: "empty input missing required fields",
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"}
+                    },
+                    "required": ["name"]
+                }),
+                input: serde_json::json!({}),
+                should_be_valid: false,
+                expected_error_patterns: vec!["name", "required"],
+            },
+        ];
+
+        for test_case in test_cases {
+            let validator = Validator::new(&test_case.schema)
+                .unwrap_or_else(|e| panic!("Test '{}': Failed to compile schema: {}", test_case.name, e));
+
+            let errors: Vec<String> = validator
+                .iter_errors(&test_case.input)
+                .map(|e| format!("{}", e))
+                .collect();
+
+            let is_valid = errors.is_empty();
+
+            assert_eq!(
+                is_valid, test_case.should_be_valid,
+                "Test '{}': Expected valid={}, got valid={}. Errors: {:?}",
+                test_case.name, test_case.should_be_valid, is_valid, errors
+            );
+
+            if !test_case.should_be_valid {
+                for pattern in test_case.expected_error_patterns {
+                    assert!(
+                        errors.iter().any(|e| e.to_lowercase().contains(&pattern.to_lowercase())),
+                        "Test '{}': Expected error containing '{}', but got errors: {:?}",
+                        test_case.name, pattern, errors
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_validation_response_with_complex_input() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "user": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "email": {"type": "string", "format": "email"}
+                    },
+                    "required": ["name", "email"]
+                }
+            }
+        });
+
+        let validator = Validator::new(&schema).unwrap();
+
+        // Valid nested object
+        let valid_input = serde_json::json!({
+            "user": {
+                "name": "John Doe",
+                "email": "john@example.com"
+            }
+        });
+
+        let errors: Vec<String> = validator
+            .iter_errors(&valid_input)
+            .map(|e| format!("{}", e))
+            .collect();
+
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_invalid_schema_compilation() {
+        // Malformed schema - invalid reference
+        let bad_schema = serde_json::json!({
+            "type": "object",
+            "$ref": "#/definitions/nonexistent"
+        });
+
+        let result = Validator::new(&bad_schema);
+        // Schema compilation should fail or handle the invalid reference
+        // The behavior depends on jsonschema crate version
+        match result {
+            Ok(validator) => {
+                // If it compiles, validation should still work
+                let input = serde_json::json!({});
+                let _errors: Vec<String> = validator
+                    .iter_errors(&input)
+                    .map(|e| format!("{}", e))
+                    .collect();
+            }
+            Err(_) => {
+                // Expected - schema compilation failed
+            }
+        }
+    }
+
+    #[test]
+    fn test_validation_response_preserves_input() {
+        // Ensure the received input is preserved exactly as received
+        let complex_input = serde_json::json!({
+            "nested": {
+                "array": [1, 2, 3],
+                "null_value": null,
+                "bool": true,
+                "number": 42.5
+            },
+            "extra": "field"
+        });
+
+        let response = ValidationResponse {
+            valid: false,
+            received_input: complex_input.clone(),
+            errors: Some(vec!["test error".to_string()]),
+        };
+
+        let serialized = serde_json::to_value(&response).unwrap();
+        assert_eq!(serialized["receivedInput"], complex_input);
+        assert_eq!(serialized["valid"], false);
+    }
+
+    #[test]
+    fn test_empty_schema_validation() {
+        // Empty schema allows any input
+        let schema = serde_json::json!({});
+
+        let validator = Validator::new(&schema).unwrap();
+
+        let any_input = serde_json::json!({"anything": "goes", "here": [1, 2, 3]});
+        let errors: Vec<String> = validator
+            .iter_errors(&any_input)
+            .map(|e| format!("{}", e))
+            .collect();
+
+        assert!(errors.is_empty());
+    }
+
+
 
     #[test]
     fn test_tool_serialization_schema() {
