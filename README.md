@@ -9,6 +9,7 @@ A simple Model Context Protocol (MCP) server that provides various tools to test
 - **succeed**: Always succeeds (useful for verifying basic connectivity)
 - **add_tool**: Dynamically adds a new tool at runtime to session.
 - **remove_tool**: Dynamically removes a tool at runtime from session.
+- **get_image**: Returns an MCP logo image in various formats (png, gif, jpeg, webp, avif)
 - Built with the official [MCP Rust SDK](https://github.com/modelcontextprotocol/rust-sdk)
 - Communicates over stdio for easy integration
 
@@ -43,6 +44,10 @@ The server communicates via stdio and follows the [Model Context Protocol](https
 - **succeed**: Returns a success message immediately.
 - **add_tool**: Adds a dynamic tool. Takes `name` (string) and `input_json_schema` (object).
 - **remove_tool**: Removes a dynamic tool. Takes `name` (string).
+- **get_image**: Returns an MCP logo image in the specified format. Parameters:
+  - `type` (required): Image format - `"png"`, `"gif"`, `"jpeg"`, `"webp"`, or `"avif"`
+  - `audience` (optional): Array of intended audiences - `["user"]`, `["assistant"]`, or `["user", "assistant"]`
+  - `priority` (optional): Number from 0.0 to 1.0 indicating importance (1.0 = most important, 0.0 = least important)
 
 ## License
 
