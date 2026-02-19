@@ -5,6 +5,7 @@
 //!
 //! Built using the official Model Context Protocol Rust SDK.
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use rmcp::service::RequestContext;
 use rmcp::service::RoleServer;
 use rmcp::{
@@ -69,6 +70,41 @@ pub struct AddToolRequest {
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RemoveToolRequest {
     name: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageType {
+    Png,
+    Gif,
+    Jpeg,
+    Webp,
+    Avif,
+}
+
+/// Intended audience for the content
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Audience {
+    /// Content intended for end users
+    User,
+    /// Content intended for AI assistants
+    Assistant,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct GetImageRequest {
+    /// The image format to return
+    #[serde(rename = "type")]
+    image_type: ImageType,
+    /// Optional intended audience(s) for this content. Valid values are "user" and "assistant".
+    /// For example, ["user", "assistant"] indicates content useful for both.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audience: Option<Vec<Audience>>,
+    /// Optional priority from 0.0 to 1.0 indicating importance.
+    /// 1.0 means "most important" (required), 0.0 means "least important" (optional).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    priority: Option<f32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -194,6 +230,73 @@ impl FailingMcpServer {
         Ok(CallToolResult::success(vec![rmcp::model::Content::text(
             "tool removed",
         )]))
+    }
+
+    /// Returns an MCP logo image in the specified format
+    #[rmcp::tool(description = "Returns an MCP logo image in the specified format (png, gif, jpeg, webp, avif). Optionally specify audience and priority for annotations.")]
+    async fn get_image(
+        &self,
+        params: Parameters<GetImageRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let image_type = params.0.image_type;
+        let audience = params.0.audience;
+        let priority = params.0.priority;
+        
+        // Validate priority if provided
+        if let Some(p) = priority {
+            if !(0.0..=1.0).contains(&p) {
+                return Err(ErrorData {
+                    code: ErrorCode(-32602),
+                    message: "priority must be between 0.0 and 1.0".into(),
+                    data: None,
+                });
+            }
+        }
+        
+        let (data, mime_type) = match image_type {
+            ImageType::Png => {
+                let bytes = include_bytes!("../assets/mcp.png");
+                (BASE64.encode(bytes), "image/png")
+            }
+            ImageType::Gif => {
+                let bytes = include_bytes!("../assets/mcp.gif");
+                (BASE64.encode(bytes), "image/gif")
+            }
+            ImageType::Jpeg => {
+                let bytes = include_bytes!("../assets/mcp.jpeg");
+                (BASE64.encode(bytes), "image/jpeg")
+            }
+            ImageType::Webp => {
+                let bytes = include_bytes!("../assets/mcp.webp");
+                (BASE64.encode(bytes), "image/webp")
+            }
+            ImageType::Avif => {
+                let bytes = include_bytes!("../assets/mcp.avif");
+                (BASE64.encode(bytes), "image/avif")
+            }
+        };
+
+        eprintln!("get_image: Returning {} image", mime_type);
+
+        // Build the content with optional annotations
+        let mut content = rmcp::model::Content::image(data, mime_type);
+        
+        if let Some(audience_list) = audience {
+            let roles: Vec<rmcp::model::Role> = audience_list
+                .into_iter()
+                .map(|a| match a {
+                    Audience::User => rmcp::model::Role::User,
+                    Audience::Assistant => rmcp::model::Role::Assistant,
+                })
+                .collect();
+            content = content.with_audience(roles);
+        }
+        
+        if let Some(p) = priority {
+            content = content.with_priority(p);
+        }
+
+        Ok(CallToolResult::success(vec![content]))
     }
 }
 
@@ -422,6 +525,43 @@ async fn run_http(port: u16) -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_image_content_format() {
+        // Verify the image content format matches MCP spec:
+        // {
+        //   "type": "image",
+        //   "data": "base64-encoded-data",
+        //   "mimeType": "image/png",
+        //   "annotations": { ... }
+        // }
+        use rmcp::model::Content;
+        let content = Content::image("dGVzdA==", "image/png");
+        let json = serde_json::to_value(&content).unwrap();
+        
+        assert_eq!(json.get("type").unwrap(), "image");
+        assert_eq!(json.get("data").unwrap(), "dGVzdA==");
+        assert_eq!(json.get("mimeType").unwrap(), "image/png");
+        
+        // Verify annotations field is not present when not set
+        assert!(json.get("annotations").is_none());
+        
+        // Test with annotations
+        use rmcp::model::Role;
+        let content_with_annotations = Content::image("dGVzdA==", "image/png")
+            .with_audience(vec![Role::User])
+            .with_priority(0.9);
+        let json_annotated = serde_json::to_value(&content_with_annotations).unwrap();
+        
+        assert_eq!(json_annotated.get("type").unwrap(), "image");
+        assert_eq!(json_annotated.get("data").unwrap(), "dGVzdA==");
+        assert_eq!(json_annotated.get("mimeType").unwrap(), "image/png");
+        
+        let annotations = json_annotated.get("annotations").unwrap();
+        assert_eq!(annotations.get("audience").unwrap(), &serde_json::json!(["user"]));
+        let priority = annotations.get("priority").unwrap().as_f64().unwrap();
+        assert!((priority - 0.9).abs() < 0.001);
+    }
 
     #[tokio::test]
     async fn test_dynamic_tools() {
