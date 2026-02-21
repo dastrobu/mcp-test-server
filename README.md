@@ -10,7 +10,7 @@ A simple Model Context Protocol (MCP) server that provides various tools to test
 - **add_tool**: Dynamically adds a new tool at runtime to session.
 - **remove_tool**: Dynamically removes a tool at runtime from session.
 - Built with the official [MCP Rust SDK](https://github.com/modelcontextprotocol/rust-sdk)
-- Communicates over stdio for easy integration
+- Communicates over stdio (default) or HTTP (Streamable HTTP) for versatile integration
 
 ## Installation
 
@@ -28,13 +28,21 @@ cargo build --release
 
 ## Usage
 
-Run the server:
+Run the server using stdio (default):
 
 ```bash
 mcp-test-server
+# or
+mcp-test-server --transport stdio
 ```
 
-The server communicates via stdio and follows the [Model Context Protocol](https://modelcontextprotocol.io/) specification.
+Run the server using HTTP (Streamable HTTP):
+
+```bash
+mcp-test-server --transport http --port 3000
+```
+
+The server follows the [Model Context Protocol](https://modelcontextprotocol.io/) specification.
 
 ### Available Tools
 
@@ -43,12 +51,3 @@ The server communicates via stdio and follows the [Model Context Protocol](https
 - **succeed**: Returns a success message immediately.
 - **add_tool**: Adds a dynamic tool. Takes `name` (string) and `input_json_schema` (object).
 - **remove_tool**: Removes a dynamic tool. Takes `name` (string).
-
-## License
-
-Licensed under either of
-
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
-
-at your option.
