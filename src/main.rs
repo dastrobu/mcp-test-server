@@ -88,9 +88,7 @@ pub enum ImageType {
 #[schemars(inline)]
 #[serde(rename_all = "lowercase")]
 pub enum Audience {
-    /// Content intended for end users
     User,
-    /// Content intended for AI assistants
     Assistant,
 }
 
@@ -1045,5 +1043,12 @@ mod tests {
         let schema = schemars::schema_for!(GetImageRequest);
         let json = serde_json::to_string_pretty(&schema).unwrap();
         assert!(!json.contains("$ref"), "Schema contains $ref: {}", json);
+    }
+
+    #[test]
+    fn test_no_const_in_schema() {
+        let schema = schemars::schema_for!(GetImageRequest);
+        let json = serde_json::to_string_pretty(&schema).unwrap();
+        assert!(!json.contains("\"const\""), "Schema contains const: {}", json);
     }
 }
