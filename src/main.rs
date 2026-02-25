@@ -73,6 +73,7 @@ pub struct RemoveToolRequest {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Copy)]
+#[schemars(inline)]
 #[serde(rename_all = "lowercase")]
 pub enum ImageType {
     Png,
@@ -84,6 +85,7 @@ pub enum ImageType {
 
 /// Intended audience for the content
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, PartialEq, Eq)]
+#[schemars(inline)]
 #[serde(rename_all = "lowercase")]
 pub enum Audience {
     /// Content intended for end users
@@ -1036,5 +1038,12 @@ mod tests {
         let json = serde_json::to_string(&tool).unwrap();
         let val: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(val["inputSchema"]["type"], "object");
+    }
+
+    #[test]
+    fn test_no_refs_in_schema() {
+        let schema = schemars::schema_for!(GetImageRequest);
+        let json = serde_json::to_string_pretty(&schema).unwrap();
+        assert!(!json.contains("$ref"), "Schema contains $ref: {}", json);
     }
 }
