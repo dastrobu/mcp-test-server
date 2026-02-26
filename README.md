@@ -7,6 +7,7 @@ A simple Model Context Protocol (MCP) server that provides various tools to test
 - **fail**: Always returns an error (useful for testing error handling)
 - **delay**: Delays response for a specified duration (useful for testing timeouts)
 - **succeed**: Always succeeds (useful for verifying basic connectivity)
+- **get_image**: Returns an MCP logo image in a specified format (useful for testing image/binary content)
 - **add_tool**: Dynamically adds a new tool at runtime to session.
 - **remove_tool**: Dynamically removes a tool at runtime from session.
 - Built with the official [MCP Rust SDK](https://github.com/modelcontextprotocol/rust-sdk)
@@ -49,5 +50,6 @@ The server follows the [Model Context Protocol](https://modelcontextprotocol.io/
 - **fail**: Always returns an error with the message "This tool always fails intentionally for testing purposes"
 - **delay**: Takes `duration_seconds` (integer) and sleeps for that amount of time before returning success.
 - **succeed**: Returns a success message immediately.
+- **get_image**: Returns an MCP logo image in the specified format. Takes `type` (one of `png`, `gif`, `jpeg`, `webp`, `avif`), and optionally `audience` (array of `user` and/or `assistant`) and `priority` (float from 0.0 to 1.0) for annotations.
 - **add_tool**: Adds a dynamic tool. Takes `name` (string) and `input_json_schema` (object).
 - **remove_tool**: Removes a dynamic tool. Takes `name` (string).
