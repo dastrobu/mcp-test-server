@@ -12,8 +12,8 @@ use rmcp::{
     handler::server::{tool::ToolRouter, wrapper::Parameters},
     model::{
         CallToolRequestParams, CallToolResult, ErrorCode, ErrorData, Implementation,
-        ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo,
-        ServerNotification, ToolListChangedNotification,
+        ListToolsResult, LoggingLevel, LoggingMessageNotificationParam, PaginatedRequestParams,
+        ServerCapabilities, ServerInfo, ServerNotification, ToolListChangedNotification,
     },
     ServerHandler, ServiceExt,
 };
@@ -70,6 +70,46 @@ pub struct AddToolRequest {
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RemoveToolRequest {
     name: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, Debug)]
+#[schemars(inline)]
+#[serde(rename_all = "lowercase")]
+pub enum LogLevel {
+    Debug,
+    Info,
+    Notice,
+    Warning,
+    Error,
+    Critical,
+    Alert,
+    Emergency,
+}
+
+impl From<LogLevel> for LoggingLevel {
+    fn from(level: LogLevel) -> Self {
+        match level {
+            LogLevel::Debug => LoggingLevel::Debug,
+            LogLevel::Info => LoggingLevel::Info,
+            LogLevel::Notice => LoggingLevel::Notice,
+            LogLevel::Warning => LoggingLevel::Warning,
+            LogLevel::Error => LoggingLevel::Error,
+            LogLevel::Critical => LoggingLevel::Critical,
+            LogLevel::Alert => LoggingLevel::Alert,
+            LogLevel::Emergency => LoggingLevel::Emergency,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct LogMessageRequest {
+    /// The name of the logger
+    #[serde(skip_serializing_if = "Option::is_none")]
+    logger: Option<String>,
+    /// The severity of the message
+    level: LogLevel,
+    /// The message text
+    message: String,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Copy)]
@@ -233,7 +273,7 @@ impl FailingMcpServer {
     }
 
     /// Returns an MCP logo image in the specified format
-    #[rmcp::tool(description = "Returns an MCP logo image in the specified format (png, gif, jpeg, webp, avif). Optionally specify audience and priority for annotations.")]
+    #[rmcp::tool(description = "Returns a test image in the specified format (png, gif, jpeg, webp, avif). Optionally specify audience and priority for annotations.")]
     async fn get_image(
         &self,
         params: Parameters<GetImageRequest>,
@@ -241,7 +281,7 @@ impl FailingMcpServer {
         let image_type = params.0.image_type;
         let audience = params.0.audience;
         let priority = params.0.priority;
-        
+
         // Validate priority if provided
         if let Some(p) = priority {
             if !(0.0..=1.0).contains(&p) {
@@ -252,7 +292,7 @@ impl FailingMcpServer {
                 });
             }
         }
-        
+
         let (data, mime_type) = match image_type {
             ImageType::Png => {
                 let bytes = include_bytes!("../assets/mcp.png");
@@ -280,7 +320,7 @@ impl FailingMcpServer {
 
         // Build the content with optional annotations
         let mut content = rmcp::model::Content::image(data, mime_type);
-        
+
         if let Some(audience_list) = audience {
             let roles: Vec<rmcp::model::Role> = audience_list
                 .into_iter()
@@ -291,12 +331,52 @@ impl FailingMcpServer {
                 .collect();
             content = content.with_audience(roles);
         }
-        
+
         if let Some(p) = priority {
             content = content.with_priority(p);
         }
 
         Ok(CallToolResult::success(vec![content]))
+    }
+
+    /// Sends a log message via MCP logging notifications
+    #[rmcp::tool(description = "Sends a log message via MCP logging notifications")]
+    async fn log_message(
+        &self,
+        params: Parameters<LogMessageRequest>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let log_level = params.0.level;
+        let logger = params.0.logger.clone();
+        let message = params.0.message.clone();
+
+        eprintln!(
+            "log_message: Sending log notification: [{:?}] {}",
+            log_level, message
+        );
+
+        ctx.peer
+            .send_notification(ServerNotification::LoggingMessageNotification(
+                rmcp::model::Notification {
+                    method: Default::default(),
+                    params: LoggingMessageNotificationParam {
+                        level: log_level.into(),
+                        logger,
+                        data: serde_json::Value::String(message),
+                    },
+                    extensions: Default::default(),
+                },
+            ))
+            .await
+            .map_err(|e| ErrorData {
+                code: ErrorCode::default(),
+                message: format!("Failed to send log message: {}", e).into(),
+                data: None,
+            })?;
+
+        Ok(CallToolResult::success(vec![rmcp::model::Content::text(
+            "Log message sent",
+        )]))
     }
 }
 
@@ -315,7 +395,10 @@ impl ServerHandler for FailingMcpServer {
                     .into(),
             ),
             capabilities: {
-                let mut caps = ServerCapabilities::builder().enable_tools().build();
+                let mut caps = ServerCapabilities::builder()
+                    .enable_tools()
+                    .enable_logging()
+                    .build();
                 if let Some(tools) = &mut caps.tools {
                     tools.list_changed = Some(true);
                 }
@@ -467,6 +550,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("  - succeed: Always succeeds with a success message");
             eprintln!("  - add_tool: Adds a dynamic tool");
             eprintln!("  - remove_tool: Removes a dynamic tool");
+            eprintln!("  - log_message: Sends a log message via MCP logging notifications");
             eprintln!();
 
             // Serve on stdio
@@ -538,25 +622,25 @@ mod tests {
         use rmcp::model::Content;
         let content = Content::image("dGVzdA==", "image/png");
         let json = serde_json::to_value(&content).unwrap();
-        
+
         assert_eq!(json.get("type").unwrap(), "image");
         assert_eq!(json.get("data").unwrap(), "dGVzdA==");
         assert_eq!(json.get("mimeType").unwrap(), "image/png");
-        
+
         // Verify annotations field is not present when not set
         assert!(json.get("annotations").is_none());
-        
+
         // Test with annotations
         use rmcp::model::Role;
         let content_with_annotations = Content::image("dGVzdA==", "image/png")
             .with_audience(vec![Role::User])
             .with_priority(0.9);
         let json_annotated = serde_json::to_value(&content_with_annotations).unwrap();
-        
+
         assert_eq!(json_annotated.get("type").unwrap(), "image");
         assert_eq!(json_annotated.get("data").unwrap(), "dGVzdA==");
         assert_eq!(json_annotated.get("mimeType").unwrap(), "image/png");
-        
+
         let annotations = json_annotated.get("annotations").unwrap();
         assert_eq!(annotations.get("audience").unwrap(), &serde_json::json!(["user"]));
         let priority = annotations.get("priority").unwrap().as_f64().unwrap();
