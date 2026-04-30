@@ -8,6 +8,7 @@ A simple Model Context Protocol (MCP) server that provides various tools to test
 - **delay**: Delays response for a specified duration (useful for testing timeouts)
 - **succeed**: Always succeeds (useful for verifying basic connectivity)
 - **get_image**: Returns an MCP logo image in a specified format (useful for testing image/binary content)
+- **get_mixed_content**: Returns a sequence of mixed content items (text and images) in a single response (useful for testing mixed content handling)
 - **add_tool**: Dynamically adds a new tool at runtime to session.
 - **remove_tool**: Dynamically removes a tool at runtime from session.
 - **get_image**: Returns an MCP logo in various image formats (png, gif, jpeg, webp, avif).
@@ -56,4 +57,5 @@ The server follows the [Model Context Protocol](https://modelcontextprotocol.io/
 - **add_tool**: Adds a dynamic tool. Takes `name` (string) and `input_json_schema` (object).
 - **remove_tool**: Removes a dynamic tool. Takes `name` (string).
 - **get_image**: Returns an MCP logo image. Takes `type` (enum: png, gif, jpeg, webp, avif) and optional `audience` and `priority`.
+- **get_mixed_content**: Returns a sequence of mixed content items in a single response. Takes `content` (array of "text" or "image" values, e.g. `["text", "image", "text"]`). Useful for testing how clients handle multiple content blocks of different types in a single tool response.
 - **log_message**: Sends a log message. Takes `level` (enum: debug, info, notice, warning, error, critical, alert, emergency), `message` (string), and optional `logger` (string).

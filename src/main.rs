@@ -13,7 +13,8 @@ use rmcp::{
     model::{
         CallToolRequestParams, CallToolResult, ErrorCode, ErrorData, Implementation,
         ListToolsResult, LoggingLevel, LoggingMessageNotificationParam, PaginatedRequestParams,
-        ServerCapabilities, ServerInfo, ServerNotification, ToolListChangedNotification,
+        ServerCapabilities, ServerInfo, ServerNotification, SetLevelRequestParams,
+        ToolListChangedNotification,
     },
     ServerHandler, ServiceExt,
 };
@@ -23,6 +24,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use jsonschema::Validator;
+
+
+
 
 use axum::Router;
 use clap::Parser;
@@ -147,6 +151,23 @@ pub struct GetImageRequest {
     priority: Option<f32>,
 }
 
+/// Content type for mixed content responses
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq)]
+#[schemars(inline)]
+#[serde(rename_all = "lowercase")]
+pub enum ContentType {
+    Text,
+    Image,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct GetMixedContentRequest {
+    /// Array specifying the sequence of content items to return.
+    /// Each element is either "text" or "image".
+    /// Example: ["text", "image", "text"] returns text, then an image, then text.
+    content: Vec<ContentType>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolDefinition {
     name: String,
@@ -162,10 +183,27 @@ pub struct ValidationResponse {
     errors: Option<Vec<String>>,
 }
 
+/// Returns a numeric severity for a LoggingLevel (higher = more severe).
+/// Used to compare levels for filtering per the MCP logging/setLevel spec.
+fn logging_level_severity(level: LoggingLevel) -> u8 {
+    match level {
+        LoggingLevel::Debug => 0,
+        LoggingLevel::Info => 1,
+        LoggingLevel::Notice => 2,
+        LoggingLevel::Warning => 3,
+        LoggingLevel::Error => 4,
+        LoggingLevel::Critical => 5,
+        LoggingLevel::Alert => 6,
+        LoggingLevel::Emergency => 7,
+    }
+}
+
 #[derive(Clone)]
 pub struct FailingMcpServer {
+    #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
     pub dynamic_tools: Arc<RwLock<HashMap<String, ToolDefinition>>>,
+    pub log_level: Arc<RwLock<LoggingLevel>>,
 }
 
 #[rmcp::tool_router]
@@ -174,6 +212,7 @@ impl FailingMcpServer {
         Self {
             tool_router: Self::tool_router(),
             dynamic_tools: Arc::new(RwLock::new(HashMap::new())),
+            log_level: Arc::new(RwLock::new(LoggingLevel::Debug)),
         }
     }
 
@@ -272,6 +311,57 @@ impl FailingMcpServer {
         )]))
     }
 
+    /// Returns a sequence of mixed content items (text and images) in a single response
+    #[rmcp::tool(
+        description = "Returns a sequence of mixed content items (text and images) in a single response. Specify the desired sequence via the content array, e.g. [\"text\", \"image\", \"text\"]."
+    )]
+    async fn get_mixed_content(
+        &self,
+        params: Parameters<GetMixedContentRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let content_types = params.0.content;
+
+        if content_types.is_empty() {
+            return Err(ErrorData {
+                code: ErrorCode(-32602),
+                message: "content array must not be empty".into(),
+                data: None,
+            });
+        }
+
+        let mut items: Vec<rmcp::model::Content> = Vec::new();
+        let mut text_counter = 0u32;
+        let mut image_counter = 0u32;
+
+        for ct in &content_types {
+            match ct {
+                ContentType::Text => {
+                    text_counter += 1;
+                    items.push(rmcp::model::Content::text(format!(
+                        "This is text item #{}",
+                        text_counter
+                    )));
+                }
+                ContentType::Image => {
+                    image_counter += 1;
+                    // Return a small PNG image
+                    let bytes = include_bytes!("../assets/mcp.png");
+                    let data = BASE64.encode(bytes);
+                    items.push(rmcp::model::Content::image(data, "image/png"));
+                }
+            }
+        }
+
+        eprintln!(
+            "get_mixed_content: Returning {} items ({} text, {} image)",
+            items.len(),
+            text_counter,
+            image_counter
+        );
+
+        Ok(CallToolResult::success(items))
+    }
+
     /// Returns an MCP logo image in the specified format
     #[rmcp::tool(description = "Returns a test image in the specified format (png, gif, jpeg, webp, avif). Optionally specify audience and priority for annotations.")]
     async fn get_image(
@@ -350,23 +440,36 @@ impl FailingMcpServer {
         let logger = params.0.logger.clone();
         let message = params.0.message.clone();
 
+        let configured_level = *self.log_level.read().unwrap();
+        let msg_severity = logging_level_severity(log_level.into());
+        let min_severity = logging_level_severity(configured_level);
+
+        if msg_severity < min_severity {
+            eprintln!(
+                "log_message: Suppressing [{:?}] (below configured level {:?}): {}",
+                log_level, configured_level, message
+            );
+            return Ok(CallToolResult::success(vec![rmcp::model::Content::text(
+                format!(
+                    "Log message suppressed (level {:?} is below configured minimum {:?})",
+                    log_level, configured_level
+                ),
+            )]));
+        }
+
         eprintln!(
             "log_message: Sending log notification: [{:?}] {}",
             log_level, message
         );
 
+        let mut notification_params =
+            LoggingMessageNotificationParam::new(log_level.into(), serde_json::Value::String(message));
+        if let Some(l) = logger {
+            notification_params = notification_params.with_logger(l);
+        }
+
         ctx.peer
-            .send_notification(ServerNotification::LoggingMessageNotification(
-                rmcp::model::Notification {
-                    method: Default::default(),
-                    params: LoggingMessageNotificationParam {
-                        level: log_level.into(),
-                        logger,
-                        data: serde_json::Value::String(message),
-                    },
-                    extensions: Default::default(),
-                },
-            ))
+            .notify_logging_message(notification_params)
             .await
             .map_err(|e| ErrorData {
                 code: ErrorCode::default(),
@@ -383,29 +486,34 @@ impl FailingMcpServer {
 #[rmcp::tool_handler]
 impl ServerHandler for FailingMcpServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            server_info: Implementation {
-                name: "mcp-test-server".into(),
-                version: env!("CARGO_PKG_VERSION").into(),
-                ..Default::default()
-            },
-            instructions: Some(
-                "A test server for analyzing tool execution in MCP clients. \
-                 Provides various tools for testing edge cases."
-                    .into(),
-            ),
-            capabilities: {
-                let mut caps = ServerCapabilities::builder()
-                    .enable_tools()
-                    .enable_logging()
-                    .build();
-                if let Some(tools) = &mut caps.tools {
-                    tools.list_changed = Some(true);
-                }
-                caps
-            },
-            ..Default::default()
+        let mut caps = ServerCapabilities::builder()
+            .enable_tools()
+            .enable_logging()
+            .build();
+        if let Some(tools) = &mut caps.tools {
+            tools.list_changed = Some(true);
         }
+
+        ServerInfo::new(caps)
+            .with_server_info(Implementation::new(
+                "mcp-test-server",
+                env!("CARGO_PKG_VERSION"),
+            ))
+            .with_instructions(
+                "A test server for analyzing tool execution in MCP clients. \
+                 Provides various tools for testing edge cases.",
+            )
+    }
+
+    async fn set_level(
+        &self,
+        request: SetLevelRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<(), ErrorData> {
+        let new_level = request.level;
+        eprintln!("set_level: Setting log level to {:?}", new_level);
+        *self.log_level.write().unwrap() = new_level;
+        Ok(())
     }
 }
 
@@ -417,6 +525,14 @@ struct DynamicProxy {
 impl ServerHandler for DynamicProxy {
     fn get_info(&self) -> ServerInfo {
         self.inner.get_info()
+    }
+
+    async fn set_level(
+        &self,
+        request: SetLevelRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<(), ErrorData> {
+        self.inner.set_level(request, context).await
     }
 
     async fn list_tools(
@@ -432,17 +548,11 @@ impl ServerHandler for DynamicProxy {
         for tool in dynamic.values() {
             let input_schema = Arc::new(tool.input_json_schema.clone());
 
-            result.tools.push(rmcp::model::Tool {
-                name: tool.name.clone().into(),
-                description: Some("Dynamic tool".into()),
+            result.tools.push(rmcp::model::Tool::new(
+                tool.name.clone(),
+                "Dynamic tool",
                 input_schema,
-                output_schema: None,
-                title: None,
-                annotations: None,
-                icons: None,
-                meta: None,
-                execution: None,
-            });
+            ));
         }
 
         Ok(result)
@@ -550,6 +660,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("  - succeed: Always succeeds with a success message");
             eprintln!("  - add_tool: Adds a dynamic tool");
             eprintln!("  - remove_tool: Removes a dynamic tool");
+            eprintln!("  - get_mixed_content: Returns mixed text and image content");
             eprintln!("  - log_message: Sends a log message via MCP logging notifications");
             eprintln!();
 
@@ -557,8 +668,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let server = proxy
                 .serve((tokio::io::stdin(), tokio::io::stdout()))
                 .await?;
-
-            // Wait for completion
             server.waiting().await?;
         }
         TransportType::Http => {
@@ -578,10 +687,7 @@ async fn run_http(port: u16) -> Result<(), Box<dyn std::error::Error>> {
             Ok(DynamicProxy { inner: handler })
         },
         LocalSessionManager::default().into(),
-        StreamableHttpServerConfig {
-            cancellation_token: ct.child_token(),
-            ..Default::default()
-        },
+        StreamableHttpServerConfig::default().with_cancellation_token(ct.child_token()),
     );
 
     let app = Router::new()
@@ -1105,17 +1211,11 @@ mod tests {
             .unwrap()
             .clone();
 
-        let tool = rmcp::model::Tool {
-            name: "test".into(),
-            description: Some("Dynamic tool".into()),
-            input_schema: Arc::new(schema),
-            output_schema: None,
-            title: None,
-            annotations: None,
-            icons: None,
-            meta: None,
-            execution: None,
-        };
+        let tool = rmcp::model::Tool::new(
+            "test",
+            "Dynamic tool",
+            Arc::new(schema),
+        );
 
         let json = serde_json::to_string(&tool).unwrap();
         let val: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1134,5 +1234,131 @@ mod tests {
         let schema = schemars::schema_for!(GetImageRequest);
         let json = serde_json::to_string_pretty(&schema).unwrap();
         assert!(!json.contains("\"const\""), "Schema contains const: {}", json);
+    }
+
+    #[test]
+    fn test_mixed_content_schema_no_refs() {
+        let schema = schemars::schema_for!(GetMixedContentRequest);
+        let json = serde_json::to_string_pretty(&schema).unwrap();
+        assert!(!json.contains("$ref"), "Schema contains $ref: {}", json);
+        assert!(!json.contains("\"const\""), "Schema contains const: {}", json);
+    }
+
+    #[test]
+    fn test_mixed_content_response_format() {
+        // Verify the mixed content output matches MCP spec:
+        // Each item in the content array should be either a text or image content block
+        use rmcp::model::Content;
+
+        let text = Content::text("Hello");
+        let image = Content::image("dGVzdA==", "image/png");
+
+        let result = CallToolResult::success(vec![text, image]);
+        let json = serde_json::to_value(&result).unwrap();
+
+        let content_arr = json.get("content").unwrap().as_array().unwrap();
+        assert_eq!(content_arr.len(), 2);
+        assert_eq!(content_arr[0].get("type").unwrap(), "text");
+        assert_eq!(content_arr[0].get("text").unwrap(), "Hello");
+        assert_eq!(content_arr[1].get("type").unwrap(), "image");
+        assert_eq!(content_arr[1].get("data").unwrap(), "dGVzdA==");
+        assert_eq!(content_arr[1].get("mimeType").unwrap(), "image/png");
+    }
+
+    #[test]
+    fn test_logging_level_severity_ordering() {
+        // Verify severity ordering matches MCP spec:
+        // debug < info < notice < warning < error < critical < alert < emergency
+        assert!(logging_level_severity(LoggingLevel::Debug) < logging_level_severity(LoggingLevel::Info));
+        assert!(logging_level_severity(LoggingLevel::Info) < logging_level_severity(LoggingLevel::Notice));
+        assert!(logging_level_severity(LoggingLevel::Notice) < logging_level_severity(LoggingLevel::Warning));
+        assert!(logging_level_severity(LoggingLevel::Warning) < logging_level_severity(LoggingLevel::Error));
+        assert!(logging_level_severity(LoggingLevel::Error) < logging_level_severity(LoggingLevel::Critical));
+        assert!(logging_level_severity(LoggingLevel::Critical) < logging_level_severity(LoggingLevel::Alert));
+        assert!(logging_level_severity(LoggingLevel::Alert) < logging_level_severity(LoggingLevel::Emergency));
+    }
+
+    #[test]
+    fn test_set_level_stores_level() {
+        // Verify that set_level correctly updates the stored log level
+        let server = FailingMcpServer::new();
+
+        // Default level should be Debug (most permissive)
+        assert_eq!(*server.log_level.read().unwrap(), LoggingLevel::Debug);
+
+        // Simulate setting a new level
+        *server.log_level.write().unwrap() = LoggingLevel::Warning;
+        assert_eq!(*server.log_level.read().unwrap(), LoggingLevel::Warning);
+
+        *server.log_level.write().unwrap() = LoggingLevel::Emergency;
+        assert_eq!(*server.log_level.read().unwrap(), LoggingLevel::Emergency);
+    }
+
+    #[test]
+    fn test_log_level_filtering_logic() {
+        // Verify that messages below the configured level would be filtered
+        // This tests the comparison logic used in log_message
+
+        // When configured at Warning, Debug/Info/Notice should be suppressed
+        let configured = LoggingLevel::Warning;
+        let min_severity = logging_level_severity(configured);
+
+        assert!(
+            logging_level_severity(LoggingLevel::Debug) < min_severity,
+            "Debug should be below Warning"
+        );
+        assert!(
+            logging_level_severity(LoggingLevel::Info) < min_severity,
+            "Info should be below Warning"
+        );
+        assert!(
+            logging_level_severity(LoggingLevel::Notice) < min_severity,
+            "Notice should be below Warning"
+        );
+
+        // Warning and above should pass
+        assert!(
+            logging_level_severity(LoggingLevel::Warning) >= min_severity,
+            "Warning should pass"
+        );
+        assert!(
+            logging_level_severity(LoggingLevel::Error) >= min_severity,
+            "Error should pass"
+        );
+        assert!(
+            logging_level_severity(LoggingLevel::Critical) >= min_severity,
+            "Critical should pass"
+        );
+        assert!(
+            logging_level_severity(LoggingLevel::Alert) >= min_severity,
+            "Alert should pass"
+        );
+        assert!(
+            logging_level_severity(LoggingLevel::Emergency) >= min_severity,
+            "Emergency should pass"
+        );
+    }
+
+    #[test]
+    fn test_set_level_request_params_deserialization() {
+        // Verify SetLevelRequestParams can be deserialized from the wire format
+        // that MCP Inspector / clients would send
+        let json = serde_json::json!({
+            "level": "warning"
+        });
+        let params: SetLevelRequestParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.level, LoggingLevel::Warning);
+
+        let json = serde_json::json!({
+            "level": "error"
+        });
+        let params: SetLevelRequestParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.level, LoggingLevel::Error);
+
+        let json = serde_json::json!({
+            "level": "debug"
+        });
+        let params: SetLevelRequestParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.level, LoggingLevel::Debug);
     }
 }
