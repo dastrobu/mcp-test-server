@@ -2,7 +2,7 @@ version: 2
 updates:
   allow:
     - dependency-type: all
-  - package-ecosystem: "gomod"
+  - package-ecosystem: "cargo"
     directory: "/"
     schedule:
       interval: "weekly"
