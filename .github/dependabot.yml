@@ -1,7 +1,5 @@
 version: 2
 updates:
-  allow:
-    - dependency-type: all
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
