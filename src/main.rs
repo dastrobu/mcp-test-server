@@ -12,9 +12,8 @@ use rmcp::{
     handler::server::{tool::ToolRouter, wrapper::Parameters},
     model::{
         CallToolRequestParams, CallToolResult, ErrorCode, ErrorData, Implementation,
-        ListToolsResult, LoggingLevel, LoggingMessageNotificationParam, PaginatedRequestParams,
-        ServerCapabilities, ServerInfo, ServerNotification, SetLevelRequestParams,
-        ToolListChangedNotification,
+        ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo,
+        ServerNotification, ToolListChangedNotification,
     },
     ServerHandler, ServiceExt,
 };
@@ -74,46 +73,6 @@ pub struct AddToolRequest {
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RemoveToolRequest {
     name: String,
-}
-
-#[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, Debug)]
-#[schemars(inline)]
-#[serde(rename_all = "lowercase")]
-pub enum LogLevel {
-    Debug,
-    Info,
-    Notice,
-    Warning,
-    Error,
-    Critical,
-    Alert,
-    Emergency,
-}
-
-impl From<LogLevel> for LoggingLevel {
-    fn from(level: LogLevel) -> Self {
-        match level {
-            LogLevel::Debug => LoggingLevel::Debug,
-            LogLevel::Info => LoggingLevel::Info,
-            LogLevel::Notice => LoggingLevel::Notice,
-            LogLevel::Warning => LoggingLevel::Warning,
-            LogLevel::Error => LoggingLevel::Error,
-            LogLevel::Critical => LoggingLevel::Critical,
-            LogLevel::Alert => LoggingLevel::Alert,
-            LogLevel::Emergency => LoggingLevel::Emergency,
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct LogMessageRequest {
-    /// The name of the logger
-    #[serde(skip_serializing_if = "Option::is_none")]
-    logger: Option<String>,
-    /// The severity of the message
-    level: LogLevel,
-    /// The message text
-    message: String,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Copy)]
@@ -183,27 +142,11 @@ pub struct ValidationResponse {
     errors: Option<Vec<String>>,
 }
 
-/// Returns a numeric severity for a LoggingLevel (higher = more severe).
-/// Used to compare levels for filtering per the MCP logging/setLevel spec.
-fn logging_level_severity(level: LoggingLevel) -> u8 {
-    match level {
-        LoggingLevel::Debug => 0,
-        LoggingLevel::Info => 1,
-        LoggingLevel::Notice => 2,
-        LoggingLevel::Warning => 3,
-        LoggingLevel::Error => 4,
-        LoggingLevel::Critical => 5,
-        LoggingLevel::Alert => 6,
-        LoggingLevel::Emergency => 7,
-    }
-}
-
 #[derive(Clone)]
 pub struct FailingMcpServer {
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
     pub dynamic_tools: Arc<RwLock<HashMap<String, ToolDefinition>>>,
-    pub log_level: Arc<RwLock<LoggingLevel>>,
 }
 
 #[rmcp::tool_router]
@@ -212,7 +155,6 @@ impl FailingMcpServer {
         Self {
             tool_router: Self::tool_router(),
             dynamic_tools: Arc::new(RwLock::new(HashMap::new())),
-            log_level: Arc::new(RwLock::new(LoggingLevel::Debug)),
         }
     }
 
@@ -428,68 +370,12 @@ impl FailingMcpServer {
 
         Ok(CallToolResult::success(vec![content]))
     }
-
-    /// Sends a log message via MCP logging notifications
-    #[rmcp::tool(description = "Sends a log message via MCP logging notifications")]
-    async fn log_message(
-        &self,
-        params: Parameters<LogMessageRequest>,
-        ctx: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let log_level = params.0.level;
-        let logger = params.0.logger.clone();
-        let message = params.0.message.clone();
-
-        let configured_level = *self.log_level.read().unwrap();
-        let msg_severity = logging_level_severity(log_level.into());
-        let min_severity = logging_level_severity(configured_level);
-
-        if msg_severity < min_severity {
-            eprintln!(
-                "log_message: Suppressing [{:?}] (below configured level {:?}): {}",
-                log_level, configured_level, message
-            );
-            return Ok(CallToolResult::success(vec![rmcp::model::Content::text(
-                format!(
-                    "Log message suppressed (level {:?} is below configured minimum {:?})",
-                    log_level, configured_level
-                ),
-            )]));
-        }
-
-        eprintln!(
-            "log_message: Sending log notification: [{:?}] {}",
-            log_level, message
-        );
-
-        let mut notification_params =
-            LoggingMessageNotificationParam::new(log_level.into(), serde_json::Value::String(message));
-        if let Some(l) = logger {
-            notification_params = notification_params.with_logger(l);
-        }
-
-        ctx.peer
-            .notify_logging_message(notification_params)
-            .await
-            .map_err(|e| ErrorData {
-                code: ErrorCode::default(),
-                message: format!("Failed to send log message: {}", e).into(),
-                data: None,
-            })?;
-
-        Ok(CallToolResult::success(vec![rmcp::model::Content::text(
-            "Log message sent",
-        )]))
-    }
 }
 
 #[rmcp::tool_handler]
 impl ServerHandler for FailingMcpServer {
     fn get_info(&self) -> ServerInfo {
-        let mut caps = ServerCapabilities::builder()
-            .enable_tools()
-            .enable_logging()
-            .build();
+        let mut caps = ServerCapabilities::builder().enable_tools().build();
         if let Some(tools) = &mut caps.tools {
             tools.list_changed = Some(true);
         }
@@ -504,17 +390,6 @@ impl ServerHandler for FailingMcpServer {
                  Provides various tools for testing edge cases.",
             )
     }
-
-    async fn set_level(
-        &self,
-        request: SetLevelRequestParams,
-        _context: RequestContext<RoleServer>,
-    ) -> Result<(), ErrorData> {
-        let new_level = request.level;
-        eprintln!("set_level: Setting log level to {:?}", new_level);
-        *self.log_level.write().unwrap() = new_level;
-        Ok(())
-    }
 }
 
 #[derive(Clone)]
@@ -525,14 +400,6 @@ struct DynamicProxy {
 impl ServerHandler for DynamicProxy {
     fn get_info(&self) -> ServerInfo {
         self.inner.get_info()
-    }
-
-    async fn set_level(
-        &self,
-        request: SetLevelRequestParams,
-        context: RequestContext<RoleServer>,
-    ) -> Result<(), ErrorData> {
-        self.inner.set_level(request, context).await
     }
 
     async fn list_tools(
@@ -661,7 +528,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("  - add_tool: Adds a dynamic tool");
             eprintln!("  - remove_tool: Removes a dynamic tool");
             eprintln!("  - get_mixed_content: Returns mixed text and image content");
-            eprintln!("  - log_message: Sends a log message via MCP logging notifications");
             eprintln!();
 
             // Serve on stdio
@@ -1263,102 +1129,5 @@ mod tests {
         assert_eq!(content_arr[1].get("type").unwrap(), "image");
         assert_eq!(content_arr[1].get("data").unwrap(), "dGVzdA==");
         assert_eq!(content_arr[1].get("mimeType").unwrap(), "image/png");
-    }
-
-    #[test]
-    fn test_logging_level_severity_ordering() {
-        // Verify severity ordering matches MCP spec:
-        // debug < info < notice < warning < error < critical < alert < emergency
-        assert!(logging_level_severity(LoggingLevel::Debug) < logging_level_severity(LoggingLevel::Info));
-        assert!(logging_level_severity(LoggingLevel::Info) < logging_level_severity(LoggingLevel::Notice));
-        assert!(logging_level_severity(LoggingLevel::Notice) < logging_level_severity(LoggingLevel::Warning));
-        assert!(logging_level_severity(LoggingLevel::Warning) < logging_level_severity(LoggingLevel::Error));
-        assert!(logging_level_severity(LoggingLevel::Error) < logging_level_severity(LoggingLevel::Critical));
-        assert!(logging_level_severity(LoggingLevel::Critical) < logging_level_severity(LoggingLevel::Alert));
-        assert!(logging_level_severity(LoggingLevel::Alert) < logging_level_severity(LoggingLevel::Emergency));
-    }
-
-    #[test]
-    fn test_set_level_stores_level() {
-        // Verify that set_level correctly updates the stored log level
-        let server = FailingMcpServer::new();
-
-        // Default level should be Debug (most permissive)
-        assert_eq!(*server.log_level.read().unwrap(), LoggingLevel::Debug);
-
-        // Simulate setting a new level
-        *server.log_level.write().unwrap() = LoggingLevel::Warning;
-        assert_eq!(*server.log_level.read().unwrap(), LoggingLevel::Warning);
-
-        *server.log_level.write().unwrap() = LoggingLevel::Emergency;
-        assert_eq!(*server.log_level.read().unwrap(), LoggingLevel::Emergency);
-    }
-
-    #[test]
-    fn test_log_level_filtering_logic() {
-        // Verify that messages below the configured level would be filtered
-        // This tests the comparison logic used in log_message
-
-        // When configured at Warning, Debug/Info/Notice should be suppressed
-        let configured = LoggingLevel::Warning;
-        let min_severity = logging_level_severity(configured);
-
-        assert!(
-            logging_level_severity(LoggingLevel::Debug) < min_severity,
-            "Debug should be below Warning"
-        );
-        assert!(
-            logging_level_severity(LoggingLevel::Info) < min_severity,
-            "Info should be below Warning"
-        );
-        assert!(
-            logging_level_severity(LoggingLevel::Notice) < min_severity,
-            "Notice should be below Warning"
-        );
-
-        // Warning and above should pass
-        assert!(
-            logging_level_severity(LoggingLevel::Warning) >= min_severity,
-            "Warning should pass"
-        );
-        assert!(
-            logging_level_severity(LoggingLevel::Error) >= min_severity,
-            "Error should pass"
-        );
-        assert!(
-            logging_level_severity(LoggingLevel::Critical) >= min_severity,
-            "Critical should pass"
-        );
-        assert!(
-            logging_level_severity(LoggingLevel::Alert) >= min_severity,
-            "Alert should pass"
-        );
-        assert!(
-            logging_level_severity(LoggingLevel::Emergency) >= min_severity,
-            "Emergency should pass"
-        );
-    }
-
-    #[test]
-    fn test_set_level_request_params_deserialization() {
-        // Verify SetLevelRequestParams can be deserialized from the wire format
-        // that MCP Inspector / clients would send
-        let json = serde_json::json!({
-            "level": "warning"
-        });
-        let params: SetLevelRequestParams = serde_json::from_value(json).unwrap();
-        assert_eq!(params.level, LoggingLevel::Warning);
-
-        let json = serde_json::json!({
-            "level": "error"
-        });
-        let params: SetLevelRequestParams = serde_json::from_value(json).unwrap();
-        assert_eq!(params.level, LoggingLevel::Error);
-
-        let json = serde_json::json!({
-            "level": "debug"
-        });
-        let params: SetLevelRequestParams = serde_json::from_value(json).unwrap();
-        assert_eq!(params.level, LoggingLevel::Debug);
     }
 }
